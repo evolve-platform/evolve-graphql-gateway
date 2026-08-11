@@ -19,12 +19,19 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # One native runner per architecture. The Rust compile is far too slow under
-  # QEMU emulation to build both on one runner, so each pushes a digest-only
-  # image and the manifest is assembled afterwards.
+  # One native Namespace runner per architecture, so each leg's Remote Builder is
+  # already the right architecture and no QEMU is involved — the Rust compile is
+  # far too slow under emulation to build both on one runner. Each leg pushes a
+  # digest-only image and the manifest is assembled afterwards.
+  #
+  # arm64 is load-bearing, not a nice-to-have: it is what developers pull on
+  # Apple silicon.
   build:
     name: Build ${{ matrix.platform }}
-    runs-on: ${{ matrix.runner }}
+    runs-on:
+      # 22.04 on purpose: 24.04+ profiles link against GLIBC_2.38/2.39.
+      - nscloud-ubuntu-22.04-${{ matrix.arch }}-8x16
+      - nscloud-git-mirror-5gb
     permissions:
       contents: read
       packages: write
@@ -33,15 +40,11 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            arch: amd64
           - platform: linux/arm64
-            # Requires arm64 runners to be available to this repository.
-            # Drop this matrix entry to publish an amd64-only image.
-            runner: ubuntu-24.04-arm
+            arch: arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -49,14 +52,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # No setup-buildx-action and no cache-from/cache-to: on Namespace runners
+      # the default builder is already a Remote Builder for this architecture, and
+      # it keeps layer cache on its own volume.
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          cache-from: type=gha,scope=${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          # Keep the leg single-manifest so push-by-digest yields one digest to
+          # hand to the merge job.
+          provenance: false
+          sbom: false
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
       # The manifest job needs the digests, and artifacts are the only channel
@@ -78,7 +86,9 @@ jobs:
 
   merge:
     name: Publish manifest
-    runs-on: ubuntu-latest
+    runs-on:
+      - nscloud-ubuntu-22.04-amd64-2x4
+      - nscloud-git-mirror-5gb
     needs: [build]
     permissions:
       contents: read
@@ -89,8 +99,6 @@ jobs:
           path: /tmp/digests
           pattern: digest-*
           merge-multiple: true
-
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -127,3 +135,19 @@ jobs:
           set -euo pipefail
           docker buildx imagetools create -t "${REGISTRY}/${IMAGE_NAME}:latest" \
             $(printf "${REGISTRY}/${IMAGE_NAME}@sha256:%s " *)
+
+      # A silently amd64-only manifest would only be discovered by whoever next
+      # docker-pulls on an Apple silicon laptop. Fail the release instead.
+      - name: Assert the manifest covers both platforms
+        run: |
+          set -euo pipefail
+          tag=$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          platforms=$(docker buildx imagetools inspect --raw "${tag}" \
+            | jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' | sort -u)
+          echo "${platforms}"
+          for want in linux/amd64 linux/arm64; do
+            printf '%s\n' "${platforms}" | grep -qx "${want}" || {
+              echo "manifest ${tag} is missing ${want}" >&2
+              exit 1
+            }
+          done

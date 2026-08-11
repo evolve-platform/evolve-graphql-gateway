@@ -15,37 +15,54 @@ env:
 jobs:
   rust:
     name: Lint & test
-    runs-on: ubuntu-latest
+    runs-on:
+      # 22.04 on purpose: 24.04+ profiles link against GLIBC_2.38/2.39.
+      - nscloud-ubuntu-22.04-amd64-8x16-with-cache
+      - nscloud-git-mirror-5gb
+      - nscloud-cache-size-50gb
+      - nscloud-cache-tag-${{ github.repository_owner }}-${{ github.event.repository.name }}-cargo-amd64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # hive-router is a large git dependency; caching its compile is what keeps
+      # this job in the single-digit minutes. On Namespace the cache is a volume
+      # mount rather than a tarball restore, so it must be mounted before
+      # anything writes to ~/.cargo or ~/.rustup — hence before rustup.
+      - uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
+        with:
+          cache: rust
+
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
-
-      # hive-router is a large git dependency; caching its compile is what keeps
-      # this job in the single-digit minutes.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # Both architectures are built and booted natively. arm64 is not optional here:
+  # it is what developers run locally on Apple silicon, so an aarch64 build or
+  # runtime break has to fail a PR rather than surface at release time.
   image:
-    name: Build image & smoke test
-    runs-on: ubuntu-latest
+    name: Image ${{ matrix.arch }}
+    runs-on:
+      - nscloud-ubuntu-22.04-${{ matrix.arch }}-8x16
+      - nscloud-git-mirror-5gb
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
+      # No setup-buildx-action, no setup-qemu-action and no cache-from/cache-to:
+      # on Namespace runners the default builder is already a Remote Builder for
+      # this runner's own architecture, and it keeps layer cache on its own volume.
       - name: Build image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           load: true
           tags: evolve-gateway:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       # Boots the image the way a project would: standard config, secrets from
       # the environment, supergraph from a mounted file. Catches config template

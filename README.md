@@ -230,9 +230,11 @@ versioned tags:
 git tag v1.2.3 && git push origin v1.2.3   # -> :1.2.3, :1.2, :latest
 ```
 
-Images are built on native amd64 and arm64 runners and joined into one manifest;
-drop the arm64 matrix entry in `.github/workflows/release.yaml` if arm64 runners
-are not available to the repository.
+Images are built on native amd64 and arm64 [Namespace](https://namespace.so)
+runners and joined into one manifest — no QEMU, which the Rust compile is far too
+slow under. arm64 is required, not optional: it is what developers pull on Apple
+silicon, so CI builds and boots both architectures on every PR and the release
+fails if the published manifest is missing either one.
 
 ## Migrating from the in-repo `backend/services/graphql-gateway`
 
