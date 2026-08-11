@@ -1,0 +1,12 @@
+# Build artifacts — never send these into the build context.
+target/
+# Rendered configs may contain secrets.
+.*.rendered.*
+.env
+# Irrelevant to the Rust build.
+.git/
+.github/
+examples/
+Dockerfile
+.dockerignore
+README.md

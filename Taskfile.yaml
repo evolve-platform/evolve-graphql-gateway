@@ -1,0 +1,69 @@
+version: "3"
+
+# Standalone repo — everything here runs against this directory alone.
+# Supergraph composition is NOT part of this repo: the image takes a supergraph
+# from the Hive CDN or a mounted file, and each consuming project composes its
+# own.
+
+dotenv: [".env"]
+
+env:
+  # Dev-only values so `task dev` boots with no setup. Anything in .env wins.
+  JWT_ISSUER: '{{.JWT_ISSUER | default "http://localhost:4000"}}'
+  JWT_AUDIENCE: '{{.JWT_AUDIENCE | default "http://localhost:4000"}}'
+  COOKIE_DOMAIN: '{{.COOKIE_DOMAIN | default "localhost"}}'
+  CORS_ORIGINS: '{{.CORS_ORIGINS | default "[\"http://localhost:3000\"]"}}'
+  # Exactly 32 bytes each, as A256GCM / HS256 require. Throwaway — NEVER use
+  # these outside local dev.
+  FEDERATED_TOKEN_ENCRYPT_KEY_1: '{{.FEDERATED_TOKEN_ENCRYPT_KEY_1 | default "dev-only-encrypt-key-00000000000"}}'
+  FEDERATED_TOKEN_SIGN_KEY_1: '{{.FEDERATED_TOKEN_SIGN_KEY_1 | default "dev-only-sign-key-00000000000000"}}'
+  FEDERATED_TOKEN_COOKIE_SECURE: '{{.FEDERATED_TOKEN_COOKIE_SECURE | default "false"}}'
+  SUPERGRAPH_FILE_PATH: '{{.SUPERGRAPH_FILE_PATH | default "examples/supergraph.graphql"}}'
+
+vars:
+  IMAGE: '{{.IMAGE | default "ghcr.io/evolve-platform/evolve-gateway:dev"}}'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: "Build the release binary"
+    cmds:
+      - cargo build --release
+
+  test:
+    desc: "Run the unit tests"
+    cmds:
+      - cargo test
+
+  lint:
+    desc: "Check formatting and run clippy"
+    cmds:
+      - cargo fmt --check
+      - cargo clippy --all-targets -- -D warnings
+
+  dev:
+    desc: "Run the gateway on :4000 against examples/supergraph.graphql"
+    cmds:
+      - cargo run
+
+  docker:build:
+    desc: "Build the container image ({{.IMAGE}})"
+    cmds:
+      - docker build -t {{.IMAGE}} .
+
+  docker:run:
+    desc: "Run the image against examples/supergraph.graphql"
+    deps: [docker:build]
+    cmds:
+      - >-
+        docker run --rm -p 4000:4000
+        -e JWT_ISSUER -e JWT_AUDIENCE -e COOKIE_DOMAIN -e CORS_ORIGINS
+        -e FEDERATED_TOKEN_ENCRYPT_KEY_1 -e FEDERATED_TOKEN_SIGN_KEY_1
+        -e FEDERATED_TOKEN_COOKIE_SECURE
+        -e SUPERGRAPH_FILE_PATH=/supergraph.graphql
+        -v {{.TASKFILE_DIR}}/examples/supergraph.graphql:/supergraph.graphql:ro
+        {{.IMAGE}}

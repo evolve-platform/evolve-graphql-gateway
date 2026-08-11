@@ -1,0 +1,161 @@
+# Standard evolve-gateway router config.
+#
+# This file ships inside the Docker image at /app/router.config.yaml and is the
+# default for every project. It is a TEMPLATE: placeholders are rendered from the
+# environment at startup by the binary itself (see src/config_template.rs),
+# because Hive Router only interpolates a small fixed set of built-in overrides.
+#
+#   $${NAME}            required — the gateway refuses to start if unset
+#   $${NAME:-default}   default when unset or empty
+#   $$$${NAME}          a literal placeholder
+#
+# Rendering is plain text and does not know about YAML comments, which is why the
+# examples above are escaped: an unescaped placeholder in a comment is still
+# substituted (and still fails the boot if its variable is unset).
+#
+# Projects that need something this file cannot express should mount their own
+# config and point ROUTER_CONFIG_FILE_PATH at it; the same templating applies.
+# See README.md for the full environment variable reference.
+
+http:
+  # HOST (default 0.0.0.0) and PORT are Hive Router's own env overrides and are
+  # applied after this file is parsed, so they are not templated here.
+  port: 4000
+
+log:
+  # LOG_LEVEL / LOG_FORMAT are Hive Router env overrides, applied after parsing.
+  level: info
+
+# CORS. Credentialed browser requests require explicit origins (never `*`), so
+# CORS_ORIGINS is a JSON array string — valid YAML flow sequence — e.g.
+# '["https://example.com","https://www.example.com"]'. Terraform can produce it
+# with jsonencode(). Defaults to no origins, which blocks cross-origin browser
+# traffic until a project opts in.
+cors:
+  enabled: ${CORS_ENABLED:-true}
+  allow_credentials: true
+  methods: [GET, POST, OPTIONS]
+  policies:
+    - origins: ${CORS_ORIGINS:-[]}
+      allow_credentials: true
+
+# NOTE: no `supergraph:` block on purpose. The source comes entirely from Hive
+# Router's own env overrides — HIVE_CDN_ENDPOINT + HIVE_CDN_KEY (CDN polling) or
+# SUPERGRAPH_FILE_PATH (a mounted file). Declaring a block here would be *merged*
+# with that override and leave a stray `supergraph.path` that the hive source
+# rejects with "unknown field `path`".
+
+# Trusted / persisted documents. When enabled, only operations registered in the
+# Hive CDN (App Deployments) are accepted; the storage endpoint and key fall back
+# to the same HIVE_CDN_ENDPOINT / HIVE_CDN_KEY used for the supergraph.
+#
+# Off by default so the image boots without a Hive registry — projects that rely
+# on trusted documents must set PERSISTED_DOCUMENTS_ENABLED=true.
+persisted_documents:
+  enabled: ${PERSISTED_DOCUMENTS_ENABLED:-false}
+  # Escape hatch for tooling that must send arbitrary operations. Requests
+  # carrying the shared secret skip the documentId requirement; when
+  # TRUSTED_DOCUMENT_BYPASS_SECRET is unset the header can never match, so the
+  # bypass is closed.
+  #
+  # Hive Router lowercases incoming header names, so this lookup MUST be
+  # lowercase — a mixed-case key never matches and silently disables the bypass.
+  require_id:
+    expression: |
+      is_null(env("TRUSTED_DOCUMENT_BYPASS_SECRET")) || .request.headers."x-trusteddocument-bypasssecret" != env("TRUSTED_DOCUMENT_BYPASS_SECRET")
+  storage:
+    type: hive
+
+telemetry:
+  resource:
+    attributes:
+      service.name: ${OTEL_SERVICE_NAME:-evolve-gateway}
+  tracing:
+    # Trace context propagation. B3 by default because the rest of the Evolve
+    # stack (subgraphs, storefront) runs OTEL_PROPAGATORS=b3; W3C is off so the
+    # gateway does not adopt a stray `traceparent` from an ingress whose root
+    # span is never exported (which shows up as a "missing root span").
+    propagation:
+      trace_context: ${OTEL_PROPAGATE_TRACE_CONTEXT:-false}
+      b3: ${OTEL_PROPAGATE_B3:-true}
+    collect:
+      # Override with TELEMETRY_TRACING_SAMPLING_RATE (a Hive Router env override).
+      sampling: 1.0
+    exporters:
+      # OTLP over HTTP rather than gRPC: collectors are commonly fronted by an
+      # L7 proxy (e.g. Azure Container Apps ingress) that mangles gRPC HTTP/2
+      # trailers ("missing grpc-status trailer"). OTLP/HTTP is a plain POST.
+      #
+      # hive-router sets the endpoint programmatically and opentelemetry-otlp
+      # does not append the signal path to a programmatic endpoint, so /v1/traces
+      # and /v1/metrics are spelled out in full.
+      - kind: otlp
+        enabled: ${OTEL_TRACES_ENABLED:-false}
+        endpoint: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4318}/v1/traces"
+        protocol: http
+        http:
+          headers:
+            # Collector auth. Defaults to Honeycomb's header name; point
+            # OTEL_EXPORTER_OTLP_HEADER_NAME elsewhere for a different backend,
+            # or leave the value empty for an unauthenticated local collector.
+            ${OTEL_EXPORTER_OTLP_HEADER_NAME:-x-honeycomb-team}: "${OTEL_EXPORTER_OTLP_HEADER_VALUE:-}"
+  metrics:
+    exporters:
+      - kind: otlp
+        enabled: ${OTEL_METRICS_ENABLED:-false}
+        endpoint: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4318}/v1/metrics"
+        protocol: http
+        http:
+          headers:
+            # Collector auth. Defaults to Honeycomb's header name; point
+            # OTEL_EXPORTER_OTLP_HEADER_NAME elsewhere for a different backend,
+            # or leave the value empty for an unauthenticated local collector.
+            ${OTEL_EXPORTER_OTLP_HEADER_NAME:-x-honeycomb-team}: "${OTEL_EXPORTER_OTLP_HEADER_VALUE:-}"
+
+# Header forwarding to subgraphs.
+headers:
+  all:
+    request:
+      # Store context is supplied by the storefront and forwarded verbatim to
+      # every subgraph (subgraphs read these as required headers).
+      - propagate:
+          named:
+            - X-StoreContext-StoreKey
+            - X-StoreContext-Locale
+            - X-StoreContext-Currency
+      # Client IP, derived from the ingress-provided X-Forwarded-For. `default`
+      # guarantees a non-empty value when there is no XFF (local dev), because
+      # subgraphs reject a missing or empty X-Client-IP.
+      - propagate:
+          named:
+            - X-Forwarded-For
+          rename: X-Client-IP
+          default: "127.0.0.1"
+
+plugins:
+  # Ports the @labdigital/federated-token gateway behaviour. The wire format
+  # between gateway and subgraphs is byte-compatible with the Node library.
+  federated_token:
+    enabled: ${FEDERATED_TOKEN_ENABLED:-true}
+    config:
+      issuer: "${JWT_ISSUER}"
+      audience: "${JWT_AUDIENCE}"
+      cookie_domain: "${COOKIE_DOMAIN}"
+      # Set FEDERATED_TOKEN_COOKIE_SECURE=false only for plain-HTTP local dev.
+      secure: ${FEDERATED_TOKEN_COOKIE_SECURE:-true}
+      same_site: ${FEDERATED_TOKEN_SAME_SITE:-lax}
+      refresh_token_path: ${FEDERATED_TOKEN_REFRESH_PATH:-/graphql/auth}
+      user_token_max_age: ${FEDERATED_TOKEN_USER_MAX_AGE:-172800} # 2 days
+      refresh_token_max_age: ${FEDERATED_TOKEN_REFRESH_MAX_AGE:-17280000} # 200 days
+      subject_token_key: ${FEDERATED_TOKEN_SUBJECT_KEY:-commercetools}
+      # Both secrets must be exactly 32 bytes. The first key in each list signs
+      # new tokens; the rest stay listed so tokens issued under an older `kid`
+      # still verify. To rotate, prepend a new key with a new id.
+      #
+      # Quoted so all-digit secrets are not parsed as YAML numbers.
+      encrypt_keys:
+        - id: "${FEDERATED_TOKEN_ENCRYPT_KEY_ID_1:-1}"
+          secret: "${FEDERATED_TOKEN_ENCRYPT_KEY_1}"
+      sign_keys:
+        - id: "${FEDERATED_TOKEN_SIGN_KEY_ID_1:-1}"
+          secret: "${FEDERATED_TOKEN_SIGN_KEY_1}"

@@ -1,0 +1,37 @@
+[package]
+name = "evolve-gateway"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Builds a custom Hive Router binary with the federated-token plugin compiled in.
+# The Hive Router plugin model is "bring your own binary": you register plugins
+# against the router entrypoint and compile them into the router itself. This
+# crate exists to produce one reusable image of that binary for every project,
+# rather than a per-project build.
+[[bin]]
+name = "evolve-gateway"
+path = "src/main.rs"
+
+[dependencies]
+# Pinned to a released tag rather than a floating "*" because the plugin API is
+# pre-1.0 and churns between patch releases. Bump this deliberately — and keep it
+# in lockstep with the hive-router version the plugin crate below compiles against.
+#
+# The `graphiql` feature swaps the npm-built Monaco "laboratory" playground for a
+# static GraphiQL page, so hive-router's build.rs no longer shells out to `npm`.
+# That keeps the (Rust-only) Docker build from needing a Node toolchain.
+hive-router = { git = "https://github.com/graphql-hive/router", tag = "hive-router/v0.0.81", features = ["graphiql"] }
+
+# The federated-token plugin lives in its own repo so multiple router binaries can
+# consume it. Pinned to a released tag (bump deliberately, in lockstep with the
+# hive-router version above).
+hive-router-federated-token = { git = "https://github.com/evolve-platform/hive-router-federated-token", tag = "v0.1.2" }
+
+[profile.release]
+# The image ships one binary and pulls in the whole router; trading build time
+# for a smaller, faster artifact is worth it here.
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

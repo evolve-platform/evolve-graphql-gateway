@@ -1,0 +1,6 @@
+/target
+# Rendered at startup from router.config.yaml; contains substituted secrets.
+.*.rendered.yaml
+.*.rendered.yml
+.*.rendered.json
+.env

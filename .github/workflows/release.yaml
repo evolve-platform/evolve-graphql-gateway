@@ -1,0 +1,129 @@
+name: Release
+
+# Publishes the reusable image to GHCR.
+#
+#   push to main   -> :main and :sha-<short>   (rolling, for tst)
+#   tag v1.2.3     -> :1.2.3, :1.2, :latest    (what projects should pin to)
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # One native runner per architecture. The Rust compile is far too slow under
+  # QEMU emulation to build both on one runner, so each pushes a digest-only
+  # image and the manifest is assembled afterwards.
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            # Requires arm64 runners to be available to this repository.
+            # Drop this matrix entry to publish an amd64-only image.
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      # The manifest job needs the digests, and artifacts are the only channel
+      # between matrix legs. Name each file after the bare digest.
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  merge:
+    name: Publish manifest
+    runs-on: ubuntu-latest
+    needs: [build]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha,prefix=sha-
+          # `latest` only for tagged releases, never for a main build.
+          flavor: latest=false
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $tags \
+            $(printf "${REGISTRY}/${IMAGE_NAME}@sha256:%s " *)
+
+      - name: Tag as latest
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create -t "${REGISTRY}/${IMAGE_NAME}:latest" \
+            $(printf "${REGISTRY}/${IMAGE_NAME}@sha256:%s " *)

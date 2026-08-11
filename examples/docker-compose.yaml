@@ -1,0 +1,27 @@
+# Runs the published image against the example supergraph — the quickest way to
+# see the gateway boot:
+#
+#   docker compose -f examples/docker-compose.yaml up
+#   curl localhost:4000/health
+#
+# Nothing here is production configuration; the keys are throwaway.
+
+services:
+  gateway:
+    image: ghcr.io/evolve-platform/evolve-gateway:latest
+    ports:
+      - "4000:4000"
+    environment:
+      JWT_ISSUER: http://localhost:4000
+      JWT_AUDIENCE: http://localhost:4000
+      COOKIE_DOMAIN: localhost
+      CORS_ORIGINS: '["http://localhost:3000"]'
+      # Plain HTTP locally, so the cookies cannot be Secure.
+      FEDERATED_TOKEN_COOKIE_SECURE: "false"
+      # Exactly 32 bytes each. Dev only.
+      FEDERATED_TOKEN_ENCRYPT_KEY_1: dev-only-encrypt-key-00000000000
+      FEDERATED_TOKEN_SIGN_KEY_1: dev-only-sign-key-00000000000000
+      # Supergraph from a mounted file instead of the Hive CDN.
+      SUPERGRAPH_FILE_PATH: /supergraph.graphql
+    volumes:
+      - ./supergraph.graphql:/supergraph.graphql:ro

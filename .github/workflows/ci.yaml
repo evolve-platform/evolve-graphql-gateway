@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      # hive-router is a large git dependency; caching its compile is what keeps
+      # this job in the single-digit minutes.
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  image:
+    name: Build image & smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: evolve-gateway:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Boots the image the way a project would: standard config, secrets from
+      # the environment, supergraph from a mounted file. Catches config template
+      # regressions that unit tests cannot (YAML shape, plugin deserialization).
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          docker run -d --name gw -p 4000:4000 \
+            -e JWT_ISSUER=http://localhost:4000 \
+            -e JWT_AUDIENCE=http://localhost:4000 \
+            -e COOKIE_DOMAIN=localhost \
+            -e CORS_ORIGINS='["http://localhost:3000"]' \
+            -e FEDERATED_TOKEN_ENCRYPT_KEY_1='dev-only-encrypt-key-00000000000' \
+            -e FEDERATED_TOKEN_SIGN_KEY_1='dev-only-sign-key-00000000000000' \
+            -e FEDERATED_TOKEN_COOKIE_SECURE=false \
+            -e SUPERGRAPH_FILE_PATH=/supergraph.graphql \
+            -v "$PWD/examples/supergraph.graphql:/supergraph.graphql:ro" \
+            evolve-gateway:ci
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4000/health >/dev/null; then
+              echo "gateway healthy"
+              exit_code=0
+              break
+            fi
+            exit_code=1
+            sleep 2
+          done
+
+          if [ "${exit_code}" -ne 0 ]; then
+            echo "gateway did not become healthy" >&2
+            docker logs gw >&2
+            exit 1
+          fi
+
+          # The plugin is compiled in, not loaded at runtime — assert it actually
+          # registered, so a bad config silently disabling it fails the build.
+          docker logs gw 2>&1 | grep -q "Plugin 'federated_token' successfully enabled"
+
+          # Credentialed CORS preflight must be answered for the configured origin.
+          curl -fsS -X OPTIONS http://127.0.0.1:4000/graphql \
+            -H 'Origin: http://localhost:3000' \
+            -H 'Access-Control-Request-Method: POST' \
+            -D - -o /dev/null | grep -qi 'access-control-allow-origin: http://localhost:3000'
+
+      - name: Assert the gateway refuses to start without its secrets
+        run: |
+          set -euo pipefail
+          if docker run --rm \
+              -e SUPERGRAPH_FILE_PATH=/supergraph.graphql \
+              -v "$PWD/examples/supergraph.graphql:/supergraph.graphql:ro" \
+              evolve-gateway:ci 2>&1 | tee /tmp/out; then
+            echo "expected a non-zero exit when required variables are unset" >&2
+            exit 1
+          fi
+          grep -q 'missing required environment variable' /tmp/out
+
+      - name: Container logs
+        if: failure()
+        run: docker logs gw || true
