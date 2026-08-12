@@ -1,0 +1,271 @@
+name: Build
+
+# One workflow for verify + publish, deliberately: CI and Release used to both
+# subscribe to `push: main`, which built the same image four times per merge
+# (twice per architecture). Here each architecture is built once and that same
+# build is what gets smoke tested and then published.
+#
+#   pull_request   -> build + smoke test only, nothing is pushed
+#   push to main   -> :main and :sha-<short>   (rolling, for tst)
+#   tag v1.2.3     -> :1.2.3, :1.2, :latest    (what projects should pin to)
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  # Superseding a PR run is free; superseding a release run would leave the
+  # manifest half-published.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Lint & test
+    runs-on:
+      # 22.04 on purpose: 24.04+ profiles link against GLIBC_2.38/2.39.
+      - nscloud-ubuntu-22.04-amd64-8x16-with-cache
+      - nscloud-git-mirror-5gb
+      - nscloud-cache-size-50gb
+      - nscloud-cache-tag-${{ github.repository_owner }}-${{ github.event.repository.name }}-cargo-amd64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # hive-router is a large git dependency; caching its compile is what keeps
+      # this job in the single-digit minutes. On Namespace the cache is a volume
+      # mount rather than a tarball restore, so it must be mounted before
+      # anything writes to ~/.cargo or ~/.rustup — hence before rustup.
+      - uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
+        with:
+          cache: rust
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  # Both architectures are built and booted natively. arm64 is not optional
+  # here: it is what developers run locally on Apple silicon, so an aarch64
+  # build or runtime break has to fail a PR rather than surface at release time.
+  #
+  # One native Namespace runner per architecture, so each leg's Remote Builder
+  # is already the right architecture and no QEMU is involved — the Rust compile
+  # is far too slow under emulation to build both on one runner. On non-PR
+  # events each leg pushes a digest-only image and the manifest is assembled
+  # afterwards.
+  image:
+    name: Image ${{ matrix.arch }}
+    runs-on:
+      # 22.04 on purpose: 24.04+ profiles link against GLIBC_2.38/2.39.
+      - nscloud-ubuntu-22.04-${{ matrix.arch }}-8x16
+      - nscloud-git-mirror-5gb
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No setup-buildx-action, no setup-qemu-action and no cache-from/cache-to:
+      # on Namespace runners the default builder is already a Remote Builder for
+      # this runner's own architecture, and it keeps layer cache on its own
+      # volume. That cache is also why the push step below costs nothing extra.
+      - name: Build image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          tags: evolve-gateway:ci
+
+      # Boots the image the way a project would: standard config, secrets from
+      # the environment, supergraph from a mounted file. Catches config template
+      # regressions that unit tests cannot (YAML shape, plugin deserialization).
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          docker run -d --name gw -p 4000:4000 \
+            -e JWT_ISSUER=http://localhost:4000 \
+            -e JWT_AUDIENCE=http://localhost:4000 \
+            -e COOKIE_DOMAIN=localhost \
+            -e CORS_ORIGINS='["http://localhost:3000"]' \
+            -e FEDERATED_TOKEN_ENCRYPT_KEY_1='dev-only-encrypt-key-00000000000' \
+            -e FEDERATED_TOKEN_SIGN_KEY_1='dev-only-sign-key-00000000000000' \
+            -e FEDERATED_TOKEN_COOKIE_SECURE=false \
+            -e SUPERGRAPH_FILE_PATH=/supergraph.graphql \
+            -v "$PWD/examples/supergraph.graphql:/supergraph.graphql:ro" \
+            evolve-gateway:ci
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4000/health >/dev/null; then
+              echo "gateway healthy"
+              exit_code=0
+              break
+            fi
+            exit_code=1
+            sleep 2
+          done
+
+          if [ "${exit_code}" -ne 0 ]; then
+            echo "gateway did not become healthy" >&2
+            docker logs gw >&2
+            exit 1
+          fi
+
+          # The plugin is compiled in, not loaded at runtime — assert it actually
+          # registered, so a bad config silently disabling it fails the build.
+          docker logs gw 2>&1 | grep -q "Plugin 'federated_token' successfully enabled"
+
+          # Credentialed CORS preflight must be answered for the configured origin.
+          curl -fsS -X OPTIONS http://127.0.0.1:4000/graphql \
+            -H 'Origin: http://localhost:3000' \
+            -H 'Access-Control-Request-Method: POST' \
+            -D - -o /dev/null | grep -qi 'access-control-allow-origin: http://localhost:3000'
+
+      - name: Assert the gateway refuses to start without its secrets
+        run: |
+          set -euo pipefail
+          if docker run --rm \
+              -e SUPERGRAPH_FILE_PATH=/supergraph.graphql \
+              -v "$PWD/examples/supergraph.graphql:/supergraph.graphql:ro" \
+              evolve-gateway:ci 2>&1 | tee /tmp/out; then
+            echo "expected a non-zero exit when required variables are unset" >&2
+            exit 1
+          fi
+          grep -q 'missing required environment variable' /tmp/out
+
+      - name: Container logs
+        if: failure()
+        run: docker logs gw || true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Not a second compile: every layer was just built above and is still in
+      # this Remote Builder's cache, so this only exports and uploads them. It
+      # runs after the smoke test so nothing reaches GHCR that did not boot —
+      # and a digest-only push is unreachable until `merge` attaches a tag.
+      - name: Push by digest
+        id: build
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # Keep the leg single-manifest so push-by-digest yields one digest to
+          # hand to the merge job.
+          provenance: false
+          sbom: false
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      # The manifest job needs the digests, and artifacts are the only channel
+      # between matrix legs. Name each file after the bare digest.
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: github.event_name != 'pull_request'
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  merge:
+    name: Publish manifest
+    runs-on:
+      - nscloud-ubuntu-22.04-amd64-2x4
+      - nscloud-git-mirror-5gb
+    # `rust` is a dependency of the publish, not of the image build: the two run
+    # in parallel, but no tag is ever attached to an image whose tests failed.
+    needs: [rust, image]
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha,prefix=sha-
+          # `latest` only for tagged releases, never for a main build.
+          flavor: latest=false
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $tags \
+            $(printf "${REGISTRY}/${IMAGE_NAME}@sha256:%s " *)
+
+      - name: Tag as latest
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create -t "${REGISTRY}/${IMAGE_NAME}:latest" \
+            $(printf "${REGISTRY}/${IMAGE_NAME}@sha256:%s " *)
+
+      # A silently amd64-only manifest would only be discovered by whoever next
+      # docker-pulls on an Apple silicon laptop. Fail the release instead.
+      - name: Assert the manifest covers both platforms
+        run: |
+          set -euo pipefail
+          tag=$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          platforms=$(docker buildx imagetools inspect --raw "${tag}" \
+            | jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' | sort -u)
+          echo "${platforms}"
+          for want in linux/amd64 linux/arm64; do
+            printf '%s\n' "${platforms}" | grep -qx "${want}" || {
+              echo "manifest ${tag} is missing ${want}" >&2
+              exit 1
+            }
+          done
