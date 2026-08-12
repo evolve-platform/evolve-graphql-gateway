@@ -213,6 +213,7 @@ task test           # unit tests
 task lint           # cargo fmt --check + clippy
 task docker:build   # build the image
 task docker:run     # build, then run it against the example supergraph
+task changelog      # add a changelog fragment (see Releasing)
 ```
 
 `task dev` supplies throwaway dev values for the required variables; put real
@@ -223,12 +224,28 @@ lockstep — the plugin crate compiles against a specific router version.
 
 ## Releasing
 
-Push to `main` publishes `:main` and `:sha-<short>`. Tagging publishes the
-versioned tags:
+Versions come from [changie](https://github.com/miniscruff/changie), same as the
+Terraform providers and `staticfiles-sync`. Every user-visible change carries a
+changelog fragment:
 
 ```bash
-git tag v1.2.3 && git push origin v1.2.3   # -> :1.2.3, :1.2, :latest
+task changelog      # or: changie new
 ```
+
+That writes a YAML fragment to `.changes/unreleased/`; commit it with the change.
+The `kind` you pick decides the bump — `Added`/`Deprecated` → minor,
+`Changed`/`Removed` → major, `Fixed`/`Security`/`Dependency` → patch.
+
+From there it is automatic:
+
+1. Any push to `main` publishes `:main` and `:sha-<short>` (rolling, for tst),
+   and refreshes an open **Release vX.Y.Z** PR containing the batched
+   `CHANGELOG.md`.
+2. Merging that PR tags the commit, creates the GitHub release, and publishes the
+   versioned tags: `:1.2.3`, `:1.2`, `:latest` — which is what projects pin to.
+
+Pushing a `v*.*.*` tag by hand publishes the same versioned tags, if you ever
+need to release outside that flow.
 
 Images are built on native amd64 and arm64 [Namespace](https://namespace.so)
 runners and joined into one manifest — no QEMU, which the Rust compile is far too

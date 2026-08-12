@@ -50,6 +50,12 @@ tasks:
     cmds:
       - cargo run
 
+  changelog:
+    desc: "Add a changelog fragment for the current change (changie new)"
+    interactive: true
+    cmds:
+      - changie new
+
   docker:build:
     desc: "Build the container image ({{.IMAGE}})"
     cmds:
