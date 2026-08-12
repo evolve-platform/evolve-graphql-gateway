@@ -1,0 +1,34 @@
+name: Generate release pull request
+
+# Keeps an open "Release vX.Y.Z" PR up to date from the changie fragments in
+# .changes/unreleased. Merging that PR is what cuts the release: this same
+# workflow then tags the commit, creates the GitHub release, and dispatches
+# build.yaml at the tag so the versioned image is published.
+#
+# The tag is created with GITHUB_TOKEN, and refs pushed by GITHUB_TOKEN do not
+# trigger workflows — hence the explicit release-workflow dispatch rather than
+# relying on build.yaml's `push: tags` trigger.
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  generate-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # changie needs the full history to resolve the latest released version.
+          fetch-depth: 0
+
+      - name: Prepare release
+        uses: labd/changie-release-action@1299f6ba27a50b2f2beb09d73bcbdc1d87a415f4 # v0.6.1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          release-workflow: build.yaml
