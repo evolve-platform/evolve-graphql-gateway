@@ -71,13 +71,21 @@ telemetry:
     attributes:
       service.name: ${OTEL_SERVICE_NAME:-evolve-gateway}
   tracing:
-    # Trace context propagation. B3 by default because the rest of the Evolve
-    # stack (subgraphs, storefront) runs OTEL_PROPAGATORS=b3; W3C is off so the
-    # gateway does not adopt a stray `traceparent` from an ingress whose root
-    # span is never exported (which shows up as a "missing root span").
+    # Trace context propagation. W3C `traceparent` is the standard and the format
+    # an Evolve stack speaks unless it opts out: a storefront on @vercel/otel
+    # registers `tracecontext`, and subgraphs take the OTel JS default. With W3C
+    # off the gateway drops the storefront's context and starts a fresh trace,
+    # and the subgraphs then drop the gateway's — every trace ends up
+    # single-service.
+    #
+    # B3 is opt-in (OTEL_PROPAGATE_B3=true) for a stack that runs
+    # OTEL_PROPAGATORS=b3 throughout — e.g. on GCP, where B3 avoids interference
+    # with the spans Google's ingress creates from x-cloud-trace-context. Turn
+    # W3C off there too if that ingress injects a `traceparent` whose root span
+    # is never exported, which surfaces as a "missing root span".
     propagation:
-      trace_context: ${OTEL_PROPAGATE_TRACE_CONTEXT:-false}
-      b3: ${OTEL_PROPAGATE_B3:-true}
+      trace_context: ${OTEL_PROPAGATE_TRACE_CONTEXT:-true}
+      b3: ${OTEL_PROPAGATE_B3:-false}
     collect:
       # Override with TELEMETRY_TRACING_SAMPLING_RATE (a Hive Router env override).
       sampling: 1.0

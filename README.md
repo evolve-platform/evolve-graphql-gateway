@@ -139,14 +139,20 @@ operations.
 | `OTEL_EXPORTER_OTLP_HEADER_NAME`  | `x-honeycomb-team`       | Collector auth header                    |
 | `OTEL_EXPORTER_OTLP_HEADER_VALUE` | empty                    | e.g. the Honeycomb API key               |
 | `OTEL_SERVICE_NAME`               | `evolve-gateway`         | `service.name` resource attribute        |
-| `OTEL_PROPAGATE_B3`               | `true`                   |                                          |
-| `OTEL_PROPAGATE_TRACE_CONTEXT`    | `false`                  | W3C `traceparent`                        |
+| `OTEL_PROPAGATE_TRACE_CONTEXT`    | `true`                   | W3C `traceparent`                        |
+| `OTEL_PROPAGATE_B3`               | `false`                  |                                          |
 
 OTLP is sent over HTTP rather than gRPC, because collectors are commonly fronted
-by an L7 proxy that mangles gRPC HTTP/2 trailers. B3 is the default propagator to
-match the rest of the Evolve stack (`OTEL_PROPAGATORS=b3`); W3C is off so the
-gateway does not adopt a stray `traceparent` from an ingress whose root span is
-never exported.
+by an L7 proxy that mangles gRPC HTTP/2 trailers.
+
+W3C `traceparent` is the default propagator: a storefront on `@vercel/otel`
+registers `tracecontext` and subgraphs take the OTel JS default, so turning it
+off leaves the gateway unable to join either side and every trace ends up
+single-service. Enable B3 (`OTEL_PROPAGATE_B3=true`) for a stack that runs
+`OTEL_PROPAGATORS=b3` throughout — e.g. on GCP, where B3 avoids interference with
+the spans Google's ingress creates from `x-cloud-trace-context`. Turn W3C off
+there too if that ingress injects a `traceparent` whose root span is never
+exported.
 
 ### Federated token plugin
 
