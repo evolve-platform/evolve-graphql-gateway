@@ -136,8 +136,7 @@ operations.
 | `OTEL_TRACES_ENABLED`             | `false`                  |                                          |
 | `OTEL_METRICS_ENABLED`            | `false`                  |                                          |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`     | `http://localhost:4318`  | `/v1/traces` and `/v1/metrics` appended  |
-| `OTEL_EXPORTER_OTLP_HEADER_NAME`  | `x-honeycomb-team`       | Collector auth header                    |
-| `OTEL_EXPORTER_OTLP_HEADER_VALUE` | empty                    | e.g. the Honeycomb API key               |
+| `OTEL_EXPORTER_OTLP_HEADERS`      | empty                    | e.g. `x-honeycomb-team=<key>`            |
 | `OTEL_SERVICE_NAME`               | `evolve-gateway`         | `service.name` resource attribute        |
 | `OTEL_PROPAGATE_TRACE_CONTEXT`    | `true`                   | W3C `traceparent`                        |
 | `OTEL_PROPAGATE_B3`               | `false`                  |                                          |
@@ -268,7 +267,6 @@ the packaging changed:
   hard-coded keys. Set `FEDERATED_TOKEN_ENCRYPT_KEY_1` and
   `FEDERATED_TOKEN_SIGN_KEY_1` explicitly — with the previous values if existing
   sessions must survive the cutover.
-- **`HONEYCOMB_API_KEY` → `OTEL_EXPORTER_OTLP_HEADER_VALUE`.**
 - **Telemetry and persisted documents are now opt-in.** Set
   `OTEL_TRACES_ENABLED=true`, `OTEL_METRICS_ENABLED=true` and
   `PERSISTED_DOCUMENTS_ENABLED=true` to keep the previous behaviour.

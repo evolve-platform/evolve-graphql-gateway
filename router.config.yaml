@@ -101,24 +101,12 @@ telemetry:
         enabled: ${OTEL_TRACES_ENABLED:-false}
         endpoint: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4318}/v1/traces"
         protocol: http
-        http:
-          headers:
-            # Collector auth. Defaults to Honeycomb's header name; point
-            # OTEL_EXPORTER_OTLP_HEADER_NAME elsewhere for a different backend,
-            # or leave the value empty for an unauthenticated local collector.
-            ${OTEL_EXPORTER_OTLP_HEADER_NAME:-x-honeycomb-team}: "${OTEL_EXPORTER_OTLP_HEADER_VALUE:-}"
   metrics:
     exporters:
       - kind: otlp
         enabled: ${OTEL_METRICS_ENABLED:-false}
         endpoint: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4318}/v1/metrics"
         protocol: http
-        http:
-          headers:
-            # Collector auth. Defaults to Honeycomb's header name; point
-            # OTEL_EXPORTER_OTLP_HEADER_NAME elsewhere for a different backend,
-            # or leave the value empty for an unauthenticated local collector.
-            ${OTEL_EXPORTER_OTLP_HEADER_NAME:-x-honeycomb-team}: "${OTEL_EXPORTER_OTLP_HEADER_VALUE:-}"
 
 # Header forwarding to subgraphs.
 headers:
