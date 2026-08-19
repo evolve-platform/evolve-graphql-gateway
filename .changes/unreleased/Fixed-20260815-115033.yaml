@@ -1,3 +1,0 @@
-kind: Fixed
-body: Default trace context propagation to W3C `traceparent` and make B3 opt-in. With B3-only defaults the gateway dropped the incoming context and started a new trace, so storefront, gateway and subgraph spans landed in three separate single-service traces.
-time: 2026-08-15T11:50:33.629775+02:00
