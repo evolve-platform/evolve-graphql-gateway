@@ -23,6 +23,11 @@
 //!
 //! A `$` that is not followed by `{` is left alone, so VRL expressions and any
 //! other literal `$` in the config pass through untouched.
+//!
+//! A substituted value that spans several lines is re-indented: every line after
+//! the first gets the indentation of the line the placeholder sits on. Without
+//! that, a multi-line value (a VRL program in `SUBGRAPH_URL_EXPRESSION`, say)
+//! would put its continuation lines in column 0 and break the surrounding YAML.
 
 use std::fmt;
 
@@ -113,10 +118,12 @@ where
         match (lookup(name), default) {
             // `${NAME:-d}` treats an empty value as absent; `${NAME-d}` does not.
             (Some(value), Some(Default::WhenUnsetOrEmpty(d))) if value.is_empty() => {
-                out.push_str(d)
+                push_indented(&mut out, d)
             }
-            (Some(value), _) => out.push_str(&value),
-            (None, Some(Default::WhenUnsetOrEmpty(d) | Default::WhenUnset(d))) => out.push_str(d),
+            (Some(value), _) => push_indented(&mut out, &value),
+            (None, Some(Default::WhenUnsetOrEmpty(d) | Default::WhenUnset(d))) => {
+                push_indented(&mut out, d)
+            }
             (None, None) => {
                 // Keep going so every missing variable is reported together.
                 if !missing.iter().any(|v| v == name) {
@@ -131,6 +138,39 @@ where
     }
 
     Ok(out)
+}
+
+/// Append `value` to `out`, keeping a multi-line value inside the structure it
+/// was substituted into.
+///
+/// YAML is indentation-sensitive, so the continuation lines of a multi-line value
+/// have to line up with the line the placeholder was on — otherwise a VRL program
+/// passed in an environment variable lands in column 0 and takes the surrounding
+/// block with it.
+fn push_indented(out: &mut String, value: &str) {
+    if !value.contains('\n') {
+        out.push_str(value);
+        return;
+    }
+
+    let line_start = out.rfind('\n').map_or(0, |i| i + 1);
+    let indent: String = out[line_start..]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+
+    let mut lines = value.split('\n');
+    if let Some(first) = lines.next() {
+        out.push_str(first);
+    }
+    for line in lines {
+        out.push('\n');
+        // Leave genuinely empty lines empty rather than filling them with spaces.
+        if !line.is_empty() {
+            out.push_str(&indent);
+            out.push_str(line);
+        }
+    }
 }
 
 /// Render `input` against the process environment.
@@ -273,6 +313,71 @@ mod tests {
             render_with("a: ${not a var}", env(&[])),
             Err(RenderError::Malformed { .. })
         ));
+    }
+
+    #[test]
+    fn indents_the_continuation_lines_of_a_multi_line_value() {
+        // A VRL program handed in through the environment has to stay inside the
+        // block scalar it was substituted into.
+        let out = render_with(
+            "      expression: |\n        ${EXPR}\n",
+            env(&[("EXPR", "side = \"blue\"\nif side == \"\" {\n  .default\n}")]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            out,
+            "      expression: |\n        side = \"blue\"\n        if side == \"\" {\n          .default\n        }\n"
+        );
+    }
+
+    #[test]
+    fn leaves_blank_lines_in_a_multi_line_value_blank() {
+        let out = render_with("  a: ${EXPR}", env(&[("EXPR", "one\n\ntwo")])).unwrap();
+        assert_eq!(out, "  a: one\n\n  two");
+    }
+
+    fn required_vars() -> impl Fn(&str) -> Option<String> {
+        env(&[
+            ("JWT_ISSUER", "http://localhost:4000"),
+            ("JWT_AUDIENCE", "http://localhost:4000"),
+            ("COOKIE_DOMAIN", "localhost"),
+            ("FEDERATED_TOKEN_ENCRYPT_KEY_1", "x"),
+            ("FEDERATED_TOKEN_SIGN_KEY_1", "y"),
+        ])
+    }
+
+    #[test]
+    fn renders_the_shipped_config_with_only_the_required_variables() {
+        let out = render_with(include_str!("../router.config.yaml"), required_vars()).unwrap();
+
+        // No SUBGRAPH_URL_EXPRESSION: subgraph URLs must be left as they are.
+        assert!(
+            out.contains("      expression: |\n        .default\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn folds_a_multi_line_subgraph_url_expression_into_the_config() {
+        // The whole point of the indentation rule: a VRL program handed in through
+        // the environment has to survive as valid YAML.
+        let expression = "side = string!(env(\"EVOLVE_DEPLOY_SIDE\", \"\"))\nif side == \"\" {\n  .default\n} else {\n  .default\n}";
+        let out = render_with(include_str!("../router.config.yaml"), |name| {
+            if name == "SUBGRAPH_URL_EXPRESSION" {
+                Some(expression.to_string())
+            } else {
+                required_vars()(name)
+            }
+        })
+        .unwrap();
+
+        assert!(
+            out.contains(
+                "      expression: |\n        side = string!(env(\"EVOLVE_DEPLOY_SIDE\", \"\"))\n        if side == \"\" {\n          .default\n        } else {\n          .default\n        }\n"
+            ),
+            "{out}"
+        );
     }
 
     #[test]

@@ -55,6 +55,11 @@ A `$` that is not followed by `{` is left alone, so VRL expressions pass through
 untouched. Rendering is plain text and does not understand YAML comments — a
 placeholder inside a comment is substituted too, so escape those.
 
+A value that spans several lines is re-indented: every line after the first gets
+the indentation of the line its placeholder was on. That is what lets a whole VRL
+program travel in an environment variable (see `SUBGRAPH_URL_EXPRESSION`) and still
+land as valid YAML instead of breaking out of its block in column 0.
+
 A missing required variable aborts the boot and reports **every** missing name at
 once, rather than starting with an empty secret whose tokens silently fail to
 verify.
@@ -117,6 +122,88 @@ secrets**: an image shared across projects must not ship keys.
 Credentialed requests require explicit origins, never `*`. Terraform can produce
 the value with `jsonencode(...)`. The default of no origins blocks cross-origin
 browser traffic until a project opts in.
+
+### Subgraph URL rewriting
+
+| Variable                  | Default    | Notes                                                     |
+| ------------------------- | ---------- | --------------------------------------------------------- |
+| `SUBGRAPH_URL_EXPRESSION` | `.default` | VRL expression returning the URL to call, per subgraph request |
+
+The supergraph pins every subgraph to one exact URL. This variable is the hook for
+sending the request somewhere else instead; unset, it is `.default` and nothing is
+rewritten. Nothing about any particular hosting setup is baked into the image — the
+expression is yours.
+
+It is compiled once, when the supergraph loads, and then evaluated on every
+subgraph fetch — so a syntax error surfaces at load time, while the values below
+are the ones from the request in flight:
+
+| In scope         | Is                                                      |
+| ---------------- | ------------------------------------------------------- |
+| `.default`       | the URL from the supergraph                              |
+| `.subgraph.name` | the subgraph being called                                |
+| `.request`       | `method`, `headers`, `url`, `path_params`, `operation`, `jwt` |
+| `env("NAME")`    | an environment variable, read at request time            |
+
+It must return a string. Multi-line values are re-indented into the config, so a
+real VRL program fits in the variable.
+
+#### Blue/green on Azure Container Apps
+
+ACA gives every revision a URL of its own (`app--0000065.<env>.<region>...`) and
+every traffic label one too, with three dashes (`app---blue.<env>.<region>...`).
+So a gateway staged on the `green` label reaches the green subgraphs by turning the
+revision suffix in each supergraph URL into the label it is itself running on:
+
+```hcl
+env_vars = {
+  # ...
+  SUBGRAPH_URL_EXPRESSION = <<-EOT
+    side = string!(env("EVOLVE_DEPLOY_SIDE", ""))
+    if side == "" {
+      .default
+    } else {
+      replace(string!(.default), r'^(https?://[^./]+?)--[^./]+\.', "$1---" + side + ".")
+    }
+  EOT
+}
+```
+
+Reading `EVOLVE_DEPLOY_SIDE` with `env()` rather than interpolating it in Terraform
+keeps one expression for both sides: the deploy tool sets the variable per revision
+and the same config serves blue and green. With it unset, the rewrite is off, which
+is what an environment that does not do label deployments wants.
+
+Why that regex holds up: an ACA app name cannot contain `--`, so the first `--` in
+the leading hostname label is always the revision separator. A URL without one is
+left alone (a vanity hostname survives untouched), and re-running it on an
+`---blue.` URL is a no-op.
+
+Note that the gateway's side and a subgraph's side are separate labels on separate
+apps. This only routes where you want it to if the deploy tool stages every service
+onto the same side.
+
+Caveats:
+
+- The expression applies to **every** subgraph, subscriptions included. This image
+  is shared across projects and cannot know the subgraph names, so per-subgraph
+  routing means mounting your own config with `override_subgraph_urls.subgraphs`.
+- `${...}` in the expression is substituted by the config template first, so write
+  `$${...}` for a literal one. A lone `$` (`$1`, `$name` in a `replace()`) passes
+  through untouched.
+- A regex that matches nothing leaves the URL as it was — that is the failure mode
+  to expect from a typo, rather than a broken endpoint.
+- An expression that does not compile is fail-closed but **not** fail-fast: the
+  supergraph never loads, so the gateway logs `Failed to compile VRL expression` at
+  ERROR, keeps answering `/health` with 200, and answers every GraphQL request with
+  a 503 `NO_SUPERGRAPH_AVAILABLE`. A rollout gated only on `/health` will not
+  notice — gate on a real query, or watch the logs.
+- Something the expression cannot express (per-subgraph URLs, several rules) is a
+  reason to mount your own config with `ROUTER_CONFIG_FILE_PATH`. On ACA that means
+  giving the container app a volume — an Azure Files share, or a secret mounted as
+  a file — which is more moving parts than this variable, and the mount is
+  read-only, so the rendered config lands in the temp-dir fallback (see *Bringing
+  your own config*).
 
 ### Persisted / trusted documents
 
@@ -184,6 +271,7 @@ Applied by the router itself, after the config is parsed:
 - **Header propagation** to subgraphs: `X-StoreContext-StoreKey` / `-Locale` /
   `-Currency` verbatim, and `X-Forwarded-For` renamed to `X-Client-IP` with a
   `127.0.0.1` default (subgraphs reject an empty `X-Client-IP`).
+- **Subgraph URL rewriting**, off unless `SUBGRAPH_URL_EXPRESSION` is set.
 - **Persisted documents** against the Hive CDN, with a bypass-secret escape hatch.
 - **OpenTelemetry** traces and metrics over OTLP/HTTP.
 - **`federated_token`** — the auth plugin, below.

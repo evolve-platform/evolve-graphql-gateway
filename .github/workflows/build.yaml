@@ -140,6 +140,67 @@ jobs:
             -H 'Access-Control-Request-Method: POST' \
             -D - -o /dev/null | grep -qi 'access-control-allow-origin: http://localhost:3000'
 
+      # Blue/green: the same standard config, but with the subgraph URL rewrite
+      # switched on. /health is NOT enough here — a VRL expression that fails to
+      # compile leaves the router listening and healthy while the supergraph never
+      # loads, so every query 503s with NO_SUPERGRAPH_AVAILABLE. Hence the query
+      # below: it proves the expression compiled and the supergraph is live.
+      - name: Smoke test the blue/green URL rewrite
+        run: |
+          set -euo pipefail
+          docker run -d --name gw-blue -p 4001:4000 \
+            -e JWT_ISSUER=http://localhost:4000 \
+            -e JWT_AUDIENCE=http://localhost:4000 \
+            -e COOKIE_DOMAIN=localhost \
+            -e FEDERATED_TOKEN_ENCRYPT_KEY_1='dev-only-encrypt-key-00000000000' \
+            -e FEDERATED_TOKEN_SIGN_KEY_1='dev-only-sign-key-00000000000000' \
+            -e FEDERATED_TOKEN_COOKIE_SECURE=false \
+            -e SUPERGRAPH_FILE_PATH=/supergraph.graphql \
+            -e EVOLVE_DEPLOY_SIDE=blue \
+            -e SUBGRAPH_URL_EXPRESSION='side = string!(env("EVOLVE_DEPLOY_SIDE", ""))
+            if side == "" {
+              .default
+            } else {
+              replace(string!(.default), r'"'"'^(https?://[^./]+?)--[^./]+\.'"'"', "$1---" + side + ".")
+            }' \
+            -v "$PWD/examples/supergraph.graphql:/supergraph.graphql:ro" \
+            evolve-gateway:ci
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4001/health >/dev/null; then
+              echo "gateway healthy with the URL rewrite enabled"
+              exit_code=0
+              break
+            fi
+            exit_code=1
+            sleep 2
+          done
+
+          if [ "${exit_code}" -ne 0 ]; then
+            echo "gateway did not become healthy with the URL rewrite enabled" >&2
+            docker logs gw-blue >&2
+            docker rm -f gw-blue >/dev/null
+            exit 1
+          fi
+
+          # The example subgraph is not running, so this query is expected to fail —
+          # but it must fail on the subgraph fetch, not because the supergraph (and
+          # with it the URL rewrite expression) never built.
+          if curl -sS http://127.0.0.1:4001/graphql \
+               -H 'content-type: application/json' \
+               -d '{"query":"{ hello }"}' | grep -q 'NO_SUPERGRAPH_AVAILABLE'; then
+            echo "supergraph never loaded — the URL rewrite expression did not compile" >&2
+            docker logs gw-blue >&2
+            docker rm -f gw-blue >/dev/null
+            exit 1
+          fi
+
+          # /app when it is writable, else the temp-dir fallback the binary warns about.
+          docker exec gw-blue sh -c \
+            'cat /app/.router.config.rendered.yaml 2>/dev/null || cat /tmp/.router.config.rendered.yaml' \
+            | grep -q 'if side == ""'
+          docker rm -f gw-blue >/dev/null
+
       - name: Assert the gateway refuses to start without its secrets
         run: |
           set -euo pipefail
