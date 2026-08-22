@@ -130,15 +130,22 @@ jobs:
             exit 1
           fi
 
+          # Every assertion below writes to a file first and greps the file. Piping
+          # into `grep -q` looks tidier but is a coin flip: grep exits at the first
+          # match, the producer gets SIGPIPE, and `pipefail` turns that into a 141
+          # that fails the step — only when grep happens to win the race.
+          docker logs gw >/tmp/gw.log 2>&1
+
           # The plugin is compiled in, not loaded at runtime — assert it actually
           # registered, so a bad config silently disabling it fails the build.
-          docker logs gw 2>&1 | grep -q "Plugin 'federated_token' successfully enabled"
+          grep -q "Plugin 'federated_token' successfully enabled" /tmp/gw.log
 
           # Credentialed CORS preflight must be answered for the configured origin.
           curl -fsS -X OPTIONS http://127.0.0.1:4000/graphql \
             -H 'Origin: http://localhost:3000' \
             -H 'Access-Control-Request-Method: POST' \
-            -D - -o /dev/null | grep -qi 'access-control-allow-origin: http://localhost:3000'
+            -D /tmp/cors-headers.txt -o /dev/null
+          grep -qi 'access-control-allow-origin: http://localhost:3000' /tmp/cors-headers.txt
 
       # Blue/green: the same standard config, but with the subgraph URL rewrite
       # switched on. /health is NOT enough here — a VRL expression that fails to
@@ -186,9 +193,10 @@ jobs:
           # The example subgraph is not running, so this query is expected to fail —
           # but it must fail on the subgraph fetch, not because the supergraph (and
           # with it the URL rewrite expression) never built.
-          if curl -sS http://127.0.0.1:4001/graphql \
-               -H 'content-type: application/json' \
-               -d '{"query":"{ hello }"}' | grep -q 'NO_SUPERGRAPH_AVAILABLE'; then
+          curl -sS http://127.0.0.1:4001/graphql \
+            -H 'content-type: application/json' \
+            -d '{"query":"{ hello }"}' -o /tmp/gw-blue-query.json
+          if grep -q 'NO_SUPERGRAPH_AVAILABLE' /tmp/gw-blue-query.json; then
             echo "supergraph never loaded — the URL rewrite expression did not compile" >&2
             docker logs gw-blue >&2
             docker rm -f gw-blue >/dev/null
@@ -198,7 +206,8 @@ jobs:
           # /app when it is writable, else the temp-dir fallback the binary warns about.
           docker exec gw-blue sh -c \
             'cat /app/.router.config.rendered.yaml 2>/dev/null || cat /tmp/.router.config.rendered.yaml' \
-            | grep -q 'if side == ""'
+            >/tmp/gw-blue-rendered.yaml
+          grep -q 'if side == ""' /tmp/gw-blue-rendered.yaml
           docker rm -f gw-blue >/dev/null
 
       - name: Assert the gateway refuses to start without its secrets
@@ -321,11 +330,14 @@ jobs:
         run: |
           set -euo pipefail
           tag=$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
-          platforms=$(docker buildx imagetools inspect --raw "${tag}" \
-            | jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' | sort -u)
-          echo "${platforms}"
+          docker buildx imagetools inspect --raw "${tag}" \
+            | jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' | sort -u \
+            > /tmp/platforms.txt
+          cat /tmp/platforms.txt
+          # Grepping the file rather than a pipe: `grep -q` exits at the first match
+          # and would SIGPIPE the producer, which `pipefail` turns into a failure.
           for want in linux/amd64 linux/arm64; do
-            printf '%s\n' "${platforms}" | grep -qx "${want}" || {
+            grep -qx "${want}" /tmp/platforms.txt || {
               echo "manifest ${tag} is missing ${want}" >&2
               exit 1
             }
