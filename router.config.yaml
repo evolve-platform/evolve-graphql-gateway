@@ -45,6 +45,31 @@ cors:
 # with that override and leave a stray `supergraph.path` that the hive source
 # rejects with "unknown field `path`".
 
+# Subgraph endpoint rewriting. Nothing project-specific lives here: the whole VRL
+# expression comes from SUBGRAPH_URL_EXPRESSION, and unset means `.default` —
+# every subgraph keeps exactly the URL the supergraph gave it.
+#
+# Hive Router compiles the expression once, when the supergraph loads, and then
+# evaluates it on every subgraph fetch with
+#   .default        the URL from the supergraph
+#   .subgraph.name  the subgraph being called
+#   .request        method / headers / url / path_params / operation / jwt
+#   env("NAME")     an environment variable, read at request time
+# and it must return a string.
+#
+# Blue/green is one `replace()` on `.default`; see the README for the Azure
+# Container Apps recipe. Multi-line values are re-indented into this block, so a
+# real VRL program fits in the variable.
+#
+# Applies to every subgraph, including subscriptions: an image shared by every
+# project cannot know the subgraph names, and Hive Router rejects a static URL
+# under `all`. Per-subgraph routing means mounting your own config.
+override_subgraph_urls:
+  all:
+    url:
+      expression: |
+        ${SUBGRAPH_URL_EXPRESSION:-.default}
+
 # Trusted / persisted documents. When enabled, only operations registered in the
 # Hive CDN (App Deployments) are accepted; the storage endpoint and key fall back
 # to the same HIVE_CDN_ENDPOINT / HIVE_CDN_KEY used for the supergraph.
