@@ -133,6 +133,44 @@ telemetry:
         endpoint: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4318}/v1/metrics"
         protocol: http
 
+  # Usage reporting to Hive Console — the operations dashboard, and the
+  # schema-usage data that powers unused-field detection and breaking-change
+  # checks. Off unless HIVE_USAGE_REPORTING_ENABLED=true.
+  #
+  # `token` and `target` are deliberately absent here: HIVE_ACCESS_TOKEN and
+  # HIVE_TARGET are Hive Router env overrides, applied after this file is
+  # parsed. Templating them would only add a way to render an *empty* token,
+  # which the usage agent accepts and then silently 403s on; leaving them out
+  # means enabling reporting without a token fails the boot instead, with
+  # "Usage Reporting - missing access token".
+  #
+  # HIVE_ACCESS_TOKEN is a registry access token with *write* permission — a
+  # different credential from the HIVE_CDN_KEY that fetches the supergraph.
+  # HIVE_TARGET ($organizationSlug/$projectSlug/$targetSlug, or a target UUID)
+  # is only needed when the token is an organization access token.
+  #
+  # Sending traces to Hive Console instead of your own collector is a separate
+  # switch, HIVE_TRACING_ENABLED — also a built-in override, so it needs no
+  # entry here.
+  hive:
+    usage_reporting:
+      enabled: ${HIVE_USAGE_REPORTING_ENABLED:-false}
+      # Self-hosted Hive only.
+      endpoint: ${HIVE_USAGE_REPORTING_ENDPOINT:-https://app.graphql-hive.com/usage}
+      sampling:
+        # A percentage string, `%` included: "10%" reports a tenth of the
+        # operations. Quoted because Hive Router parses it as a string, not a
+        # number.
+        rate: "${HIVE_USAGE_REPORTING_SAMPLING_RATE:-100%}"
+      # VRL evaluated per operation; returning `true` drops it from the report.
+      # Compiled once at startup, so a broken expression fails the boot rather
+      # than a request. The fields are the same as for override_subgraph_urls
+      # above, e.g. `.request.operation.name == "IntrospectionQuery"`. The
+      # default excludes nothing.
+      exclude:
+        expression: |
+          ${HIVE_USAGE_REPORTING_EXCLUDE_EXPRESSION:-false}
+
 # Header forwarding to subgraphs.
 headers:
   all:

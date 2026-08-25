@@ -240,6 +240,49 @@ the spans Google's ingress creates from `x-cloud-trace-context`. Turn W3C off
 there too if that ingress injects a `traceparent` whose root span is never
 exported.
 
+### Hive Console usage reporting
+
+Reports executed operations and the schema fields they touch back to Hive
+Console, which is what feeds the operations dashboard, unused-field detection and
+usage-aware breaking-change checks.
+
+| Variable                                    | Default                                | Notes                                                              |
+| ------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------ |
+| `HIVE_USAGE_REPORTING_ENABLED`              | `false`                                |                                                                    |
+| `HIVE_ACCESS_TOKEN`                         | unset                                  | Registry access token with **write** permission — required          |
+| `HIVE_TARGET`                               | unset                                  | `$org/$project/$target` or a UUID — see below                        |
+| `HIVE_USAGE_REPORTING_SAMPLING_RATE`        | `100%`                                 | Percentage string, `%` included                                     |
+| `HIVE_USAGE_REPORTING_EXCLUDE_EXPRESSION`   | `false`                                | VRL; returning `true` drops the operation from the report           |
+| `HIVE_USAGE_REPORTING_ENDPOINT`             | `https://app.graphql-hive.com/usage`   | Self-hosted Hive only                                              |
+
+`HIVE_ACCESS_TOKEN` is a different credential from the `HIVE_CDN_KEY` that
+fetches the supergraph — a CDN key cannot write usage. Enabling reporting without
+it fails the boot with `Usage Reporting - missing access token`, rather than
+running and dropping every report.
+
+Whether `HIVE_TARGET` is needed is decided by the token's own prefix, and getting
+it wrong fails the boot either way:
+
+| Token                                  | `HIVE_TARGET`                                     |
+| -------------------------------------- | ------------------------------------------------- |
+| `hvo1/…`, `hvu1/…`, `hvp1/…` (current) | **required** — without it: `MissingTargetId`        |
+| anything else (legacy registry token)  | **must be unset** — with it: `TargetIdWithLegacyToken` |
+
+The exclude expression sees the same fields as `SUBGRAPH_URL_EXPRESSION` and is
+compiled at startup, so a broken one fails the boot instead of a request. The
+usual use is silencing noise:
+
+```
+HIVE_USAGE_REPORTING_EXCLUDE_EXPRESSION='.request.operation.name == "IntrospectionQuery"'
+```
+
+Client names in the dashboard come from the `graphql-client-name` and
+`graphql-client-version` request headers, so operations only group by client if
+the storefront sends them.
+
+Sending traces to Hive Console instead of your own collector is a separate
+switch, `HIVE_TRACING_ENABLED`; it is independent of the OTLP exporters above.
+
 ### Federated token plugin
 
 | Variable                            | Default          |
@@ -263,7 +306,8 @@ config declares one of each; rotation needs your own config file.
 Applied by the router itself, after the config is parsed:
 `HOST`, `PORT`, `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILTER`, `ROUTER_HTTP_WORKERS`,
 `TELEMETRY_TRACING_SAMPLING_RATE`, `HIVE_CDN_POLL_INTERVAL`, `HIVE_ACCESS_TOKEN`,
-`HIVE_TARGET`, `LABORATORY_ENABLED`, `WEBSOCKET_ENABLED`, `SUBSCRIPTIONS_ENABLED`.
+`HIVE_TARGET`, `HIVE_TRACING_ENABLED`, `HIVE_USAGE_REPORTING_ENABLED`,
+`LABORATORY_ENABLED`, `WEBSOCKET_ENABLED`, `SUBSCRIPTIONS_ENABLED`.
 
 ## What the standard config does
 
@@ -274,6 +318,7 @@ Applied by the router itself, after the config is parsed:
 - **Subgraph URL rewriting**, off unless `SUBGRAPH_URL_EXPRESSION` is set.
 - **Persisted documents** against the Hive CDN, with a bypass-secret escape hatch.
 - **OpenTelemetry** traces and metrics over OTLP/HTTP.
+- **Hive Console usage reporting**, off unless `HIVE_USAGE_REPORTING_ENABLED=true`.
 - **`federated_token`** — the auth plugin, below.
 
 Anything else, bring your own config.
