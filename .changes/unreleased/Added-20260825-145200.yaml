@@ -1,3 +1,0 @@
-kind: Added
-body: 'Report usage to Hive Console. Set HIVE_USAGE_REPORTING_ENABLED=true plus HIVE_ACCESS_TOKEN (a registry token with write permission — not HIVE_CDN_KEY), and HIVE_TARGET for a current hvo1/hvu1/hvp1 token. Tune with HIVE_USAGE_REPORTING_SAMPLING_RATE, HIVE_USAGE_REPORTING_EXCLUDE_EXPRESSION (VRL) and HIVE_USAGE_REPORTING_ENDPOINT.'
-time: 2026-08-25T14:52:00.000000+02:00
