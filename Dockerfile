@@ -8,7 +8,7 @@
 # Both git dependencies (graphql-hive/router and the federated-token plugin) are
 # public, so no credentials are needed at build time.
 
-ARG RUST_VERSION=1.96
+ARG RUST_VERSION=1.98
 
 ##
 # chef: shared base with cargo-chef for dependency-layer caching (hive-router is
