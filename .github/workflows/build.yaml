@@ -138,7 +138,7 @@ jobs:
 
           # The plugin is compiled in, not loaded at runtime — assert it actually
           # registered, so a bad config silently disabling it fails the build.
-          grep -q "Plugin 'federated_token' successfully enabled" /tmp/gw.log
+          grep -q 'plugin successfully enabled.*"plugin_name":"federated_token"' /tmp/gw.log
 
           # Credentialed CORS preflight must be answered for the configured origin.
           curl -fsS -X OPTIONS http://127.0.0.1:4000/graphql \
@@ -146,6 +146,15 @@ jobs:
             -H 'Access-Control-Request-Method: POST' \
             -D /tmp/cors-headers.txt -o /dev/null
           grep -qi 'access-control-allow-origin: http://localhost:3000' /tmp/cors-headers.txt
+
+          # Responses are compressed by the router itself (no reverse proxy).
+          # Introspection is comfortably above the 1KiB min_size threshold.
+          curl -fsS http://127.0.0.1:4000/graphql \
+            -H 'Content-Type: application/json' \
+            -H 'Accept-Encoding: gzip' \
+            --data '{"query":"{ __schema { types { name fields { name } } } }"}' \
+            -D /tmp/gzip-headers.txt -o /dev/null
+          grep -qi '^content-encoding: gzip' /tmp/gzip-headers.txt
 
       # Blue/green: the same standard config, but with the subgraph URL rewrite
       # switched on. /health is NOT enough here — a VRL expression that fails to
