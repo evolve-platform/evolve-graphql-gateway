@@ -50,7 +50,7 @@ jobs:
           cache: rust
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
 
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
