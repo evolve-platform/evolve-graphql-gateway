@@ -1,3 +1,3 @@
-kind: Changed
+kind: Dependency
 body: 'Upgrade Hive Router from v0.0.81 to v0.3.0. Input-object and @oneOf variables are now validated before execution, so malformed variables that subgraphs used to accept are rejected. LOG_FORMAT only accepts text or json (pretty-tree/pretty-compact were removed), the trace log level is gone from release builds, and demand-control metrics are prefixed with hive.router.demand_control.'
 time: 2026-09-29T09:36:00.000000+02:00
