@@ -1,3 +1,8 @@
+// ntex's TLS server future (hive-router v0.3.0) nests deep enough to overflow
+// the default query depth when rustc computes its layout in release builds.
+// Upstream's own router binary sets the same limit.
+#![recursion_limit = "256"]
+
 use std::path::{Path, PathBuf};
 
 use hive_router::{
