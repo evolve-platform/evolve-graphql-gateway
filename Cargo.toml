@@ -22,12 +22,12 @@ path = "src/main.rs"
 # The `graphiql` feature swaps the npm-built Monaco "laboratory" playground for a
 # static GraphiQL page, so hive-router's build.rs no longer shells out to `npm`.
 # That keeps the (Rust-only) Docker build from needing a Node toolchain.
-hive-router = { git = "https://github.com/graphql-hive/router", tag = "hive-router/v0.0.81", features = ["graphiql"] }
+hive-router = { git = "https://github.com/graphql-hive/router", tag = "hive-router/v0.3.0", features = ["graphiql"] }
 
 # The federated-token plugin lives in its own repo so multiple router binaries can
 # consume it. Pinned to a released tag (bump deliberately, in lockstep with the
 # hive-router version above).
-hive-router-federated-token = { git = "https://github.com/evolve-platform/hive-router-federated-token", tag = "v0.1.2" }
+hive-router-federated-token = { git = "https://github.com/evolve-platform/hive-router-federated-token", tag = "v0.2.0" }
 
 [profile.release]
 # The image ships one binary and pulls in the whole router; trading build time

@@ -318,6 +318,9 @@ Applied by the router itself, after the config is parsed:
 - **Subgraph URL rewriting**, off unless `SUBGRAPH_URL_EXPRESSION` is set.
 - **Persisted documents** against the Hive CDN, with a bypass-secret escape hatch.
 - **OpenTelemetry** traces and metrics over OTLP/HTTP.
+- **Response compression** (gzip, br, zstd, deflate) negotiated via
+  `Accept-Encoding` for responses of 1 KiB and up; compressed request bodies
+  are accepted too. Built into Hive Router — no reverse proxy needed.
 - **Hive Console usage reporting**, off unless `HIVE_USAGE_REPORTING_ENABLED=true`.
 - **`federated_token`** — the auth plugin, below.
 

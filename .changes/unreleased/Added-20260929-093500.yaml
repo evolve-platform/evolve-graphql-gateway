@@ -1,0 +1,3 @@
+kind: Added
+body: 'Compress responses to clients (gzip, br, zstd, deflate, negotiated via Accept-Encoding, responses of 1KiB and up) and accept compressed request bodies, so a compressing reverse proxy is no longer needed. Tune or disable via traffic_shaping.router.compression in your own config.'
+time: 2026-09-29T09:35:00.000000+02:00
