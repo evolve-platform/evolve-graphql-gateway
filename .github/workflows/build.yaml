@@ -382,10 +382,29 @@ jobs:
             --source-version "$TAG" \
             -o cyclonedx-json@1.6=evolve-graphql-gateway.cdx.json
 
+      # The Debian layer of the published image. Crates are not in here (the
+      # binary is not built with cargo-auditable), so this does not repeat the
+      # lockfile scan above. File-level entries are dropped: thousands of paths.
+      - name: Generate image SBOM
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          SYFT_FILE_METADATA_SELECTION: none
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          "$SYFT" "ghcr.io/${GITHUB_REPOSITORY}:${TAG#v}" --platform linux/amd64 \
+            --source-name evolve-graphql-gateway \
+            --source-version "$TAG" \
+            -o cyclonedx-json@1.6=image.raw.cdx.json
+          jq '.components |= map(select(.type != "file"))' image.raw.cdx.json \
+            > evolve-graphql-gateway-image.cdx.json
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-cyclonedx
-          path: evolve-graphql-gateway.cdx.json
+          path: |
+            evolve-graphql-gateway.cdx.json
+            evolve-graphql-gateway-image.cdx.json
           retention-days: 7
 
   # Separate job so the DT key is never present while repo files are checked out.
@@ -422,3 +441,26 @@ jobs:
             -F "parentName=${PROJECT}" \
             -F "isLatest=true" \
             -F "bom=@evolve-graphql-gateway.cdx.json"
+
+      # The image gets its own library container (OSS > OSS Containers) so its
+      # OS packages are not mixed into the crate list above.
+      - name: Upload image SBOM to DependencyTrack
+        env:
+          DT_API_KEY: ${{ secrets.DEPENDENCYTRACK_OSS_APIKEY }}
+          DT_URL: https://dependencytrack-api.labdigital.nl:8443
+          PROJECT: oss/containers/evolve-graphql-gateway
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DT_API_KEY}" ]; then
+            echo "::error::DEPENDENCYTRACK_OSS_APIKEY is not available to this repo"
+            exit 1
+          fi
+          curl -sS --fail-with-body -X POST "${DT_URL}/api/v1/bom" \
+            -H "X-Api-Key: ${DT_API_KEY}" \
+            -F "autoCreate=true" \
+            -F "projectName=${PROJECT}" \
+            -F "projectVersion=${TAG}" \
+            -F "parentName=${PROJECT}" \
+            -F "isLatest=true" \
+            -F "bom=@evolve-graphql-gateway-image.cdx.json"
