@@ -1,3 +1,0 @@
-kind: Dependency
-body: 'Upgrade Hive Router from v0.3.0 to v0.3.19 and the federated-token plugin to v0.2.1. Clients now get 10s to send request headers and 10s to send the body (a slow body gets a 408 instead of a 504); tune via traffic_shaping.router.header_read_timeout / body_read_timeout. Hard-coded field arguments are sent to subgraphs as variables, and input variables with unknown fields are rejected. Includes many query-planner fixes (@requires, @include/@skip) and faster planning.'
-time: 2026-11-23T19:23:01.000000+01:00
